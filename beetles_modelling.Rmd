@@ -1,0 +1,174 @@
+---
+title: "forecast challenge"
+author: "Shubhi Sharma"
+date: "30/06/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Data prep 
+targets <-  readr::read_csv("beetles-targets.csv.gz")
+abby <- targets[targets$siteID == "DSNY", ]
+
+```
+
+```{r}
+# Model 
+RandomWalkLN = "
+model{
+  
+  #### Data Model
+  for(t in 2:n){
+    y[t] ~ dnorm(y[t-1],tau_obs)
+  }
+  
+  #### Process Model
+  ##for(t in 2:n){
+  ##  x[t]~dnorm(x[t-1],tau_add)
+  ##}
+  
+  #### Priors
+  ##x[1] ~ dnorm(x_ic,tau_ic)
+  tau_obs ~ dgamma(a_obs,r_obs)
+  tau_add ~ dgamma(a_add,r_add)
+
+  ## In sample prediction 
+  for(t in 2:n){
+    ypred[t] ~ dnorm(y[t-1],tau_obs)
+  }
+  
+}
+"
+
+# JAGS set up 
+nchain = 3
+# y <- abby$abundance + 0.001 # adding a nugget
+y <- log(abby$abundance + 0.001)
+init <- list()
+
+# log y.samp if y isn't logged!
+for(i in 1:nchain){
+  y.samp = sample(y,length(y),replace=TRUE)
+  init[[i]] <- list(tau_add=1/var(diff((y.samp))),  ## initial guess on process precision
+                    tau_obs=5/var((y.samp)))        ## initial guess on obs precision
+}
+
+
+
+data <- list(y=y,n=length(y),           ## data
+            ## x_ic=log(1000),tau_ic=100, ## initial condition prior
+             a_obs=1,r_obs=1,           ## obs error prior
+             a_add=1,r_add=1            ## process error prior
+             )
+
+# JAGS model 
+j.model   <- jags.model (file = textConnection(RandomWalkLN),
+                         data = data,
+                         # inits = init,
+                         n.chains = 3)
+
+## burn-in
+jags.out   <- coda.samples (model = j.model,
+                            variable.names = c("tau_obs", "ypred"),
+                            n.iter = 10000)
+# plot(jags.out)
+
+```
+
+
+# Posterior analysis 
+
+```{r}
+samples <- as.matrix(jags.out)
+
+time <- abby$time
+time.rng = c(1,length(targets$time))       ## adjust to zoom in and out
+y.pred <- grep("^y",colnames(samples)) ## grab all columns that start with the letter y
+ci <- apply(samples[,y.pred],2,quantile,c(0.025,0.5,0.975)) ## model was fit on log scale
+
+##### Plotting 
+
+# par(mfrow=c(1, 3))
+# Just observed data plot
+plot(time[-1], ci[2,],type='n',ylim=range(y,na.rm=TRUE),ylab="Log(abundance)", main = "Observed")
+## adjust x-axis label to be monthly if zoomed
+if(diff(time.rng) < 100){
+  axis.Date(1, at=seq(time[time.rng[1]],time[time.rng[2]],by='month'), format = "%Y-%m")
+}
+points(time[-1],y[-1],pch="+",cex=0.5)
+lines(time[-1], y[-1])
+
+# CI plot of fitted model - using all data
+plot(time[-1], ci[2,],type='n',ylim=range(y,na.rm=TRUE),ylab="Log(abundance)", main = "Fitted")
+## adjust x-axis label to be monthly if zoomed
+if(diff(time.rng) < 100){
+  axis.Date(1, at=seq(time[time.rng[1]],time[time.rng[2]],by='month'), format = "%Y-%m")
+}
+ecoforecastR::ciEnvelope(time[-1],ci[1,],ci[3,],col=ecoforecastR::col.alpha("lightBlue",0.75))
+points(time[-1],y[-1],pch="+",cex=0.5)
+lines(time[-1], y[-1])
+points(time[-1], colMeans(samples[, y.pred]), pch = "x", col = "blue")
+
+```
+
+# Forecast 
+
+```{r}
+# All 2021 data are NAs
+
+# JAGS set up same as chunk above 
+rmdate <- grep("2021",abby$time )
+ymiss <- log(abby$abundance + 0.001)
+ymiss[rmdate] <- NA
+
+
+data <- list(y=ymiss,n=length(y),           ## data
+            ## x_ic=log(1000),tau_ic=100, ## initial condition prior
+             a_obs=1,r_obs=1,           ## obs error prior
+             a_add=1,r_add=1            ## process error prior
+             )
+
+# JAGS model 
+j.model   <- jags.model (file = textConnection(RandomWalkLN),
+                         data = data,
+                         # inits = init,
+                         n.chains = 3)
+
+## burn-in
+jags.out   <- coda.samples (model = j.model,
+                            variable.names = c("tau_obs", "ypred"),
+                            n.iter = 10000)
+# plot(jags.out)
+
+
+# Visualize 
+
+samples <- as.matrix(jags.out)
+
+time <- abby$time
+time.rng = c(1,length(targets$time))       ## adjust to zoom in and out
+y.pred <- grep("^y",colnames(samples)) ## grab all columns that start with the letter y
+ci <- apply(samples[,y.pred],2,quantile,c(0.025,0.5,0.975)) ## model was fit on log scale
+
+plot(time[-1], ci[2,],type='n',ylim=range(y,na.rm=TRUE),ylab="Log(abundance)", main = "Forecast")
+## adjust x-axis label to be monthly if zoomed
+if(diff(time.rng) < 100){
+  axis.Date(1, at=seq(time[time.rng[1]],time[time.rng[2]],by='month'), format = "%Y-%m")
+}
+ecoforecastR::ciEnvelope(time[-1],ci[1,],ci[3,],col=ecoforecastR::col.alpha("orange",0.75))
+points(time[-1],ymiss[-1],pch="+",cex=0.5)
+lines(time[-1], ymiss[-1])
+points(time[-1], colMeans(samples[,y.pred]), pch = "x", col = "brown")
+
+```
+
+# Comparison of observation error by site 
+```{r}
+# Insert site name
+hist(samples[, 1], main = paste0("DSNY (n=", length(y), ")"))
+abline(v = mean(samples[, 1]), col = 'red')
+```
